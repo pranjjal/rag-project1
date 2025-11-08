@@ -8,3 +8,6 @@ sentence-transformers
 streamlit
 faiss-cpu
 youtube-transcript-api
+duckduckgo-search
+beautifulsoup4
+requests

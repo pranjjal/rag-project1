@@ -5,6 +5,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+from langchain_community.tools import DuckDuckGoSearchRun
 import os
 import tempfile
 import time
@@ -26,6 +28,8 @@ if "document_type" not in st.session_state:
     st.session_state.document_type = None
 if "document_name" not in st.session_state:
     st.session_state.document_name = ""
+if "search_mode" not in st.session_state:
+    st.session_state.search_mode = "📄 Document Only"  # Initialize with actual radio option
 
 print("Google API Key:", os.getenv("GOOGLE_API_KEY"))
 
@@ -123,6 +127,93 @@ def get_answer(question, vector_store):
     return response.content if hasattr(response, 'content') else str(response)
 
 
+def search_web(query):
+    """Perform web search using DuckDuckGo"""
+    try:
+        search = DuckDuckGoSearchAPIWrapper()
+        results = search.run(query)
+        return results
+    except Exception as e:
+        return f"Error performing web search: {str(e)}"
+
+
+def get_web_answer(question):
+    """Get answer from web search"""
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2
+    )
+
+    # First, search the web
+    search_results = search_web(question)
+    
+    prompt = PromptTemplate(
+        input_variables=["question", "search_results"],
+        template="""You are a helpful assistant that provides accurate information based on web search results.
+        
+        Question: {question}
+        
+        Web Search Results: {search_results}
+        
+        Based on the search results above, provide a comprehensive and accurate answer to the question. 
+        If the search results don't contain enough information, mention that clearly.
+        
+        Answer:"""
+    )
+
+    final_prompt = prompt.format(question=question, search_results=search_results)
+    response = llm.invoke(final_prompt)
+    
+    return response.content if hasattr(response, 'content') else str(response)
+
+
+def get_hybrid_answer(question, vector_store, document_type):
+    """Get answer combining document content and web search"""
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0.2
+    )
+
+    # Get document context
+    retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+    docs = retriever.invoke(question)
+    document_context = "\n".join([doc.page_content for doc in docs])
+
+    # Get web search results
+    web_results = search_web(question)
+    
+    prompt = PromptTemplate(
+        input_variables=["question", "document_context", "web_results", "document_type"],
+        template="""You are a helpful assistant that can combine information from a {document_type} and web search results.
+        
+        Question: {question}
+        
+        Content from {document_type}:
+        {document_context}
+        
+        Additional Web Search Results:
+        {web_results}
+        
+        Please provide a comprehensive answer that:
+        1. First uses information from the {document_type} if relevant
+        2. Then supplements with web search results for additional context
+        3. Clearly indicates which information comes from which source
+        4. If there are any contradictions, mention them
+        
+        Answer:"""
+    )
+
+    final_prompt = prompt.format(
+        question=question, 
+        document_context=document_context, 
+        web_results=web_results,
+        document_type=document_type
+    )
+    response = llm.invoke(final_prompt)
+    
+    return response.content if hasattr(response, 'content') else str(response)
+
+
 def display_chat_message(message, is_user=True):
     """Display a chat message with appropriate styling"""
     if is_user:
@@ -168,7 +259,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">📚 PDF & YouTube Q&A Chatbot</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">� AI Research Assistant: PDF, YouTube & Web Search</h1>', unsafe_allow_html=True)
     
     # Sidebar for document upload/input
     with st.sidebar:
@@ -180,6 +271,20 @@ def main():
             ["📄 PDF Upload", "🎥 YouTube URL"],
             key="input_type"
         )
+        
+        st.divider()
+        
+        # Search mode selector
+        st.header("🔍 Search Mode")
+        search_mode = st.radio(
+            "Choose search mode:",
+            ["📄 Document Only", "🌐 Web Search Only", "🔄 Hybrid (Document + Web)"],
+            index=0,
+            key="search_mode_radio"
+        )
+        
+        # Update session state based on selection
+        st.session_state.search_mode = search_mode
         
         if input_type == "📄 PDF Upload":
             uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
@@ -273,22 +378,60 @@ def main():
                     """
                     <div style="text-align: center; color: #666; padding: 50px; 
                                background-color: #fafafa; border-radius: 10px; margin: 20px 0;">
-                        <h3>👋 Welcome to PDF & YouTube Q&A Chatbot!</h3>
-                        <p>Choose your input type in the sidebar:</p>
-                        <p>📄 Upload a PDF document or 🎥 Enter a YouTube URL</p>
-                        <p>Once processed, you can ask questions about the content!</p>
+                        <h3>� Welcome to AI Research Assistant!</h3>
+                        <p><strong>Multiple ways to get information:</strong></p>
+                        <p>📄 Upload a PDF document | 🎥 Enter a YouTube URL | 🌐 Search the web</p>
+                        <p><strong>Search Modes:</strong></p>
+                        <p>📄 Document Only | 🌐 Web Search Only | 🔄 Hybrid (Document + Web)</p>
+                        <p>Choose your preferred mode in the sidebar and start exploring!</p>
                     </div>
                     """, 
                     unsafe_allow_html=True
                 )
         
         # Chat input
-        if st.session_state.pdf_processed or st.session_state.youtube_processed:
+        # Dynamic input based on search mode
+        if st.session_state.search_mode == "🌐 Web Search Only":
+            # Web search only mode - no document needed
+            question = st.text_input(
+                "🌐 Ask any question (Web Search):", 
+                placeholder="What is artificial intelligence?",
+                key="user_input"
+            )
+            
+            col_send, col_clear = st.columns([6, 1])
+            with col_send:
+                send_button = st.button("📤 Send", use_container_width=True)
+            
+            if (send_button and question) or (question and question != st.session_state.get("last_question", "")):
+                # Add user message to chat
+                st.session_state.messages.append({"role": "user", "content": question})
+                
+                # Get web search response
+                with st.spinner("🔍 Searching the web..."):
+                    try:
+                        answer = get_web_answer(question)
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+                    except Exception as e:
+                        error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                
+                st.session_state.last_question = question
+                st.rerun()
+                
+        elif st.session_state.pdf_processed or st.session_state.youtube_processed:
+            # Document-based or hybrid modes
             doc_type = "PDF" if st.session_state.pdf_processed else "YouTube video"
-            placeholder_text = f"What is this {doc_type.lower()} about?" if doc_type == "PDF" else "What topics are discussed in this video?"
+            
+            if st.session_state.search_mode == "📄 Document Only":
+                placeholder_text = f"What is this {doc_type.lower()} about?" if doc_type == "PDF" else "What topics are discussed in this video?"
+                question_label = f"💬 Ask a question about your {doc_type}:"
+            else:  # hybrid mode
+                placeholder_text = f"Ask about the {doc_type.lower()} or any related topic"
+                question_label = f"🔄 Ask about your {doc_type} or get additional web info:"
             
             question = st.text_input(
-                f"💬 Ask a question about your {doc_type}:", 
+                question_label, 
                 placeholder=placeholder_text,
                 key="user_input"
             )
@@ -301,10 +444,13 @@ def main():
                 # Add user message to chat
                 st.session_state.messages.append({"role": "user", "content": question})
                 
-                # Get AI response
+                # Get AI response based on search mode
                 with st.spinner("🤔 Thinking..."):
                     try:
-                        answer = get_answer(question, st.session_state.vector_store)
+                        if st.session_state.search_mode == "📄 Document Only":
+                            answer = get_answer(question, st.session_state.vector_store)
+                        else:  # hybrid mode
+                            answer = get_hybrid_answer(question, st.session_state.vector_store, doc_type)
                         st.session_state.messages.append({"role": "assistant", "content": answer})
                     except Exception as e:
                         error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
@@ -313,11 +459,43 @@ def main():
                 st.session_state.last_question = question
                 st.rerun()
         else:
-            st.info("📤 Please upload a PDF document or enter a YouTube URL first to start chatting!")
+            if st.session_state.search_mode == "🌐 Web Search Only":
+                st.info("🌐 Web search is ready! Ask any question to search the internet.")
+            else:
+                st.info("📤 Please upload a PDF document or enter a YouTube URL first to start chatting!")
     
     with col2:
+        st.markdown("### 🎯 Quick Actions")
+        
+        # Web search quick actions (always available)
+        if st.button("🌐 Latest News", use_container_width=True):
+            news_question = "What are the latest news and developments in technology and AI?"
+            st.session_state.messages.append({"role": "user", "content": news_question})
+            with st.spinner("📰 Searching for latest news..."):
+                try:
+                    answer = get_web_answer(news_question)
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                except Exception as e:
+                    error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            st.rerun()
+        
+        if st.button("🔍 Quick Web Search", use_container_width=True):
+            search_question = "Tell me about current trends in machine learning and artificial intelligence"
+            st.session_state.messages.append({"role": "user", "content": search_question})
+            with st.spinner("🔍 Searching the web..."):
+                try:
+                    answer = get_web_answer(search_question)
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                except Exception as e:
+                    error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            st.rerun()
+        
+        # Document-specific actions (when document is loaded)
         if st.session_state.pdf_processed or st.session_state.youtube_processed:
-            st.markdown("### 🎯 Quick Actions")
+            st.divider()
+            st.markdown("### 📄 Document Actions")
             
             # Dynamic content based on document type
             doc_type = "document" if st.session_state.pdf_processed else "video"
@@ -328,7 +506,10 @@ def main():
                 st.session_state.messages.append({"role": "user", "content": summary_question})
                 with st.spinner("📝 Creating summary..."):
                     try:
-                        answer = get_answer(summary_question, st.session_state.vector_store)
+                        if st.session_state.search_mode == "📄 Document Only":
+                            answer = get_answer(summary_question, st.session_state.vector_store)
+                        else:
+                            answer = get_hybrid_answer(summary_question, st.session_state.vector_store, doc_type)
                         st.session_state.messages.append({"role": "assistant", "content": answer})
                     except Exception as e:
                         error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
@@ -340,7 +521,23 @@ def main():
                 st.session_state.messages.append({"role": "user", "content": key_points_question})
                 with st.spinner("🎯 Finding key points..."):
                     try:
-                        answer = get_answer(key_points_question, st.session_state.vector_store)
+                        if st.session_state.search_mode == "📄 Document Only":
+                            answer = get_answer(key_points_question, st.session_state.vector_store)
+                        else:
+                            answer = get_hybrid_answer(key_points_question, st.session_state.vector_store, doc_type)
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+                    except Exception as e:
+                        error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
+                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                st.rerun()
+            
+            # Hybrid search action
+            if st.button("🔄 Enhanced Research", use_container_width=True):
+                research_question = f"Provide detailed information about the main topics in this {content_type}, supplemented with the latest web information."
+                st.session_state.messages.append({"role": "user", "content": research_question})
+                with st.spinner("🔄 Conducting enhanced research..."):
+                    try:
+                        answer = get_hybrid_answer(research_question, st.session_state.vector_store, doc_type)
                         st.session_state.messages.append({"role": "assistant", "content": answer})
                     except Exception as e:
                         error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
@@ -354,7 +551,10 @@ def main():
                     st.session_state.messages.append({"role": "user", "content": topics_question})
                     with st.spinner("🎬 Analyzing video topics..."):
                         try:
-                            answer = get_answer(topics_question, st.session_state.vector_store)
+                            if st.session_state.search_mode == "📄 Document Only":
+                                answer = get_answer(topics_question, st.session_state.vector_store)
+                            else:
+                                answer = get_hybrid_answer(topics_question, st.session_state.vector_store, "video")
                             st.session_state.messages.append({"role": "assistant", "content": answer})
                         except Exception as e:
                             error_msg = f"❌ Sorry, I encountered an error: {str(e)}"
